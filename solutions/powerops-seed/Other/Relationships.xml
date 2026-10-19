@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<EntityRelationships xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <EntityRelationship Name="business_unit_pops_workitem" />
+  <EntityRelationship Name="lk_pops_workitem_createdby" />
+  <EntityRelationship Name="lk_pops_workitem_modifiedby" />
+  <EntityRelationship Name="owner_pops_workitem" />
+  <EntityRelationship Name="team_pops_workitem" />
+  <EntityRelationship Name="user_pops_workitem" />
+</EntityRelationships>
