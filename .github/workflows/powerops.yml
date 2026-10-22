@@ -15,6 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Chrome71/PowerOps@feat/m2-ci-integration
+      - uses: Chrome71/PowerOps@main
         with:
           path: solutions
