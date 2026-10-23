@@ -63,7 +63,7 @@ jobs:
           allow-no-subscriptions: true
 
       - name: Sign in pac
-        if: false   # M9 live item 4: a broken sign-in
+        if: env.SAME_REPO == 'true'
         env:
           TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
