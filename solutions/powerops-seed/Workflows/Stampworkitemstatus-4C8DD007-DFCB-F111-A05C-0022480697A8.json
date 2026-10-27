@@ -69,7 +69,7 @@
             "parameters": {
               "entityName": "pops_workitems",
               "recordId": "@triggerOutputs()?['body/pops_workitemid']",
-              "item/pops_name": "Done"
+              "item/pops_name": "@parameters('Default Status (pops_DefaultStatus)')"
             },
             "authentication": "@parameters('$authentication')"
           }
