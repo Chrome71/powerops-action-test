@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>powerops</AssemblyName>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>powerops</ToolCommandName>
+    <PackageId>PowerOps</PackageId>
+    <Description>Open-source CLI toolkit that brings analysis, diffing, testing and repeatable deployment to Microsoft Power Platform.</Description>
+    <PackageTags>powerplatform;dataverse;alm;devops;cli</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.13" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PowerOps.Cli.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../PowerOps.Core/PowerOps.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="../../skills/**/*" LogicalName="skills/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+</Project>

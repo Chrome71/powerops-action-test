@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Chrome71/PowerOps/main/docs/schemas/flow-test.schema.json",
+  "flow": "Stamp work item status",
+  "trigger": { "body": { "pops_workitemid": "00000000-0000-0000-0000-000000000001" } },
+  "mocks": { "Update_a_row": { "status": "Succeeded" } },
+  "assertions": [
+    { "kind": "runStatus", "equals": "Succeeded" },
+    { "kind": "inputs", "action": "Update_a_row", "path": ["parameters", "item/pops_name"], "equals": "New" },
+    { "kind": "inputs", "action": "Update_a_row", "path": ["parameters", "recordId"], "equals": "00000000-0000-0000-0000-000000000001" },
+    { "kind": "outputs", "action": "Compose", "equals": "https://contoso.sharepoint.com/sites/ops" }
+  ]
+}

@@ -1,0 +1,216 @@
+name: PowerOps analyze
+description: Analyze Power Platform solutions with PowerOps and report findings in the job summary, as annotations and in code scanning.
+author: Chrome71
+
+inputs:
+  path:
+    description: Solution folder or zip to analyze; folders are searched recursively.
+    default: .
+  fail-on:
+    description: Lowest severity that fails the job (error, warning or none).
+    default: error
+  baseline:
+    description: Baseline file made with `powerops baseline`; findings in it are ignored. Empty means no baseline.
+    default: ''
+  tests:
+    description: Folder of *.flowtest.json files, relative to the workspace, to run with `powerops test` against the solutions under path. Empty means no tests. It needs no tenant and no secret, so it also runs on fork pull requests.
+    default: ''
+  upload-sarif:
+    description: Upload the SARIF report to GitHub code scanning (needs security-events write permission).
+    default: 'true'
+  category:
+    description: Code scanning category for the SARIF upload.
+    default: powerops
+  comment:
+    description: On pull_request events, post one pull request comment and update it on later runs (needs pull-requests write permission). It holds the deploy plan when target is set, else the diff of the PR's base and head solution (path must name one solution).
+    default: 'false'
+  deploy-folder:
+    description: Folder of exported solution zips (each with an optional <zip name>.settings.json) to plan. Required when target is set. The plan file is written there.
+    default: ''
+  target:
+    description: Environment (id or URL) to plan the deployment against with `powerops deploy plan`. pac and az must be signed in by earlier steps. Empty means no plan. Not used on fork pull requests.
+    default: ''
+  plan-file:
+    description: Plan file written by an earlier `deploy plan` (its folder holds the zips and settings files). When set, the action runs `powerops deploy apply` against target instead of planning; target is required. pac and az must be signed in by earlier steps.
+    default: ''
+  apply:
+    description: With plan-file, 'true' imports the reviewed plan (`--apply`); anything else is a dry run that imports nothing.
+    default: 'false'
+
+outputs:
+  plan-file:
+    description: Path of the plan file written by `deploy plan`. Empty when no plan ran or no file was written.
+    value: ${{ steps.plan.outputs.plan-file }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      with:
+        global-json-file: ${{ github.action_path }}/global.json
+
+    - name: Build PowerOps
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: dotnet build src/PowerOps.Cli -c Release
+
+    # The report steps use --fail-on none so every report is written. They continue on error so that a crash
+    # (exit 2 or 3) is not hidden: the last step runs the analysis again with the real --fail-on and fails the job.
+    - name: Job summary
+      shell: bash
+      continue-on-error: true
+      env:
+        PO_PATH: ${{ inputs.path }}
+        PO_BASELINE: ${{ inputs.baseline }}
+      run: |
+        args=(analyze "$PO_PATH" --fail-on none)
+        if [ -n "$PO_BASELINE" ]; then args+=(--baseline "$PO_BASELINE"); fi
+        dotnet "$GITHUB_ACTION_PATH/src/PowerOps.Cli/bin/Release/net10.0/powerops.dll" "${args[@]}" --format markdown >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Annotations
+      shell: bash
+      continue-on-error: true
+      env:
+        PO_PATH: ${{ inputs.path }}
+        PO_BASELINE: ${{ inputs.baseline }}
+      run: |
+        args=(analyze "$PO_PATH" --fail-on none)
+        if [ -n "$PO_BASELINE" ]; then args+=(--baseline "$PO_BASELINE"); fi
+        dotnet "$GITHUB_ACTION_PATH/src/PowerOps.Cli/bin/Release/net10.0/powerops.dll" "${args[@]}" --format json |
+          jq -r '
+            def data: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+            def prop: data | gsub(":"; "%3A") | gsub(","; "%2C");
+            .solutions[] | .path as $p | .findings[]
+            | (if ($p | endswith(".zip")) then $p elif $p == "." then .file else $p + "/" + .file end) as $file
+            | "::\(if .severity == "error" then "error" else "warning" end) file=\($file | prop),title=\(.ruleId | prop)::\(.message | data)"' | tr -d '\r'
+
+    - name: Write SARIF
+      id: sarif
+      shell: bash
+      continue-on-error: true
+      env:
+        PO_PATH: ${{ inputs.path }}
+        PO_BASELINE: ${{ inputs.baseline }}
+      run: |
+        args=(analyze "$PO_PATH" --fail-on none)
+        if [ -n "$PO_BASELINE" ]; then args+=(--baseline "$PO_BASELINE"); fi
+        dotnet "$GITHUB_ACTION_PATH/src/PowerOps.Cli/bin/Release/net10.0/powerops.dll" "${args[@]}" --format sarif --out "$RUNNER_TEMP/powerops.sarif"
+        echo "written=true" >> "$GITHUB_OUTPUT"
+
+    - name: Upload SARIF
+      if: always() && inputs.upload-sarif == 'true' && steps.sarif.outputs.written == 'true'
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+      with:
+        sarif_file: ${{ runner.temp }}/powerops.sarif
+        category: ${{ inputs.category }}
+
+    # The script records the exit code and always exits 0, so the steps after it still run; Apply test result fails the job.
+    - name: Flow tests
+      id: test
+      if: inputs.tests != ''
+      shell: bash
+      env:
+        PO_DLL: ${{ github.action_path }}/src/PowerOps.Cli/bin/Release/net10.0/powerops.dll
+        PO_PATH: ${{ inputs.path }}
+        PO_TESTS: ${{ inputs.tests }}
+      run: bash "$GITHUB_ACTION_PATH/action/test.sh"
+
+    - name: Deploy plan
+      id: plan
+      if: inputs.plan-file == '' && inputs.target != '' && github.event_name != 'pull_request_target' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
+      shell: bash
+      env:
+        PO_DLL: ${{ github.action_path }}/src/PowerOps.Cli/bin/Release/net10.0/powerops.dll
+        PO_FOLDER: ${{ inputs.deploy-folder }}
+        PO_TARGET: ${{ inputs.target }}
+        PO_COMMENT: ${{ runner.temp }}/powerops-comment.md
+      run: bash "$GITHUB_ACTION_PATH/action/plan.sh"
+
+    # With plan-file set the import runs here, so the real fail-on gates it: a failure stops the job before Deploy apply.
+    - name: Gate the apply
+      if: inputs.plan-file != ''
+      shell: bash
+      env:
+        PO_PATH: ${{ inputs.path }}
+        PO_BASELINE: ${{ inputs.baseline }}
+        PO_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        args=(analyze "$PO_PATH" --fail-on "$PO_FAIL_ON")
+        if [ -n "$PO_BASELINE" ]; then args+=(--baseline "$PO_BASELINE"); fi
+        dotnet "$GITHUB_ACTION_PATH/src/PowerOps.Cli/bin/Release/net10.0/powerops.dll" "${args[@]}"
+
+    - name: Deploy apply
+      id: apply
+      if: inputs.plan-file != '' && (steps.test.outputs.exit-code == '' || steps.test.outputs.exit-code == '0')
+      shell: bash
+      env:
+        PO_DLL: ${{ github.action_path }}/src/PowerOps.Cli/bin/Release/net10.0/powerops.dll
+        PO_PLAN_FILE: ${{ inputs.plan-file }}
+        PO_TARGET: ${{ inputs.target }}
+        PO_APPLY: ${{ inputs.apply }}
+        PO_EVENT: ${{ github.event_name }}
+        PO_FORK: ${{ github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name != github.repository }}
+      run: bash "$GITHUB_ACTION_PATH/action/apply.sh"
+
+    - name: Diff
+      if: inputs.comment == 'true' && github.event_name == 'pull_request' && (inputs.target == '' || github.event.pull_request.head.repo.full_name != github.repository)
+      shell: bash
+      env:
+        PO_DLL: ${{ github.action_path }}/src/PowerOps.Cli/bin/Release/net10.0/powerops.dll
+        PO_PATH: ${{ inputs.path }}
+        PO_COMMENT: ${{ runner.temp }}/powerops-comment.md
+      run: bash "$GITHUB_ACTION_PATH/action/diff.sh"
+
+    - name: Comment
+      if: inputs.comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        PO_COMMENT: ${{ runner.temp }}/powerops-comment.md
+        PO_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        PO_PR: ${{ github.event.pull_request.number }}
+        GH_TOKEN: ${{ github.token }}
+      run: bash "$GITHUB_ACTION_PATH/action/comment.sh"
+
+    - name: Apply fail-on
+      shell: bash
+      env:
+        PO_PATH: ${{ inputs.path }}
+        PO_BASELINE: ${{ inputs.baseline }}
+        PO_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        args=(analyze "$PO_PATH" --fail-on "$PO_FAIL_ON")
+        if [ -n "$PO_BASELINE" ]; then args+=(--baseline "$PO_BASELINE"); fi
+        dotnet "$GITHUB_ACTION_PATH/src/PowerOps.Cli/bin/Release/net10.0/powerops.dll" "${args[@]}"
+
+    - name: Apply plan result
+      if: always() && ((steps.plan.outputs.exit-code != '' && steps.plan.outputs.exit-code != '0') || (steps.apply.outputs.exit-code != '' && steps.apply.outputs.exit-code != '0'))
+      shell: bash
+      env:
+        PO_PLAN_EXIT: ${{ steps.plan.outputs.exit-code }}
+        PO_APPLY_EXIT: ${{ steps.apply.outputs.exit-code }}
+      run: |
+        if [ -n "$PO_PLAN_EXIT" ] && [ "$PO_PLAN_EXIT" != "0" ]; then
+          echo "::error::powerops deploy plan exited with code $PO_PLAN_EXIT (1 means the plan is blocked; 2 or 3 means it could not run)"
+        fi
+        case "$PO_APPLY_EXIT" in
+          "" | 0) ;;
+          1) echo "::error::powerops deploy apply refused, or a flow is not in its expected state" ;;
+          2) echo "::error::powerops deploy apply: usage error or --target mismatch" ;;
+          3) echo "::error::powerops deploy apply failed; there is no rollback, see the report" ;;
+          *) echo "::error::powerops deploy apply exited with code $PO_APPLY_EXIT" ;;
+        esac
+        exit 1
+
+    - name: Apply test result
+      if: always() && steps.test.outputs.exit-code != '' && steps.test.outputs.exit-code != '0'
+      shell: bash
+      env:
+        PO_TEST_EXIT: ${{ steps.test.outputs.exit-code }}
+      run: |
+        case "$PO_TEST_EXIT" in
+          1) echo "::error::powerops test: a flow test failed, is unmocked or uses something unsupported (see the job summary)" ;;
+          2) echo "::error::powerops test: usage error (path or tests folder not found, or no test file or solution found)" ;;
+          *) echo "::error::powerops test exited with code $PO_TEST_EXIT (3 means a solution or test file could not be read)" ;;
+        esac
+        exit 1

@@ -1,0 +1,19 @@
+# M15 live check: the merge-gate workflow from the PowerOps README, calling a copy of the action
+# (.github/actions/powerops, from the M15 branch) instead of Chrome71/PowerOps@<ref>.
+name: PowerOps flow tests
+on: pull_request   # no filter: see below. With a merge queue, add merge_group.
+
+permissions:
+  contents: read
+
+jobs:
+  powerops-flow-tests:   # the name of the required check; no other workflow may have a job of this name
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/powerops
+        with:
+          path: solutions
+          tests: flowtests
+          fail-on: none          # the check fails on flow tests only; remove this line to gate the analysis too
+          upload-sarif: 'false'  # so the job needs only contents: read
