@@ -1,0 +1,91 @@
+# M52 boundary probe. From the unprotected test-plan environment, tries the two ways into Test:
+# sign in as the apply app, and import as the plan app. Both must be refused. Runs only on a push to its own branch.
+name: Boundary probe
+
+on:
+  push:
+    branches: [m52-boundary-probe]
+
+env:
+  PAC_VERSION: 2.14.1
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    environment: test-plan
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Mask the environment URLs' forms
+        env:
+          DEV_URL: ${{ secrets.DEV_URL }}
+          TEST_URL: ${{ secrets.TEST_ENVIRONMENT_URL }}
+        run: |
+          for url in "$DEV_URL" "$TEST_URL"; do
+            host="${url#*://}"; host="${host%%/*}"
+            for v in "https://$host" "https://$host/" "$host" "${host,,}" "${host^^}" "${host%%.*}"; do echo "::add-mask::$v"; done
+          done
+
+      - name: Install pac
+        run: |
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool --version "$PAC_VERSION"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      # Way 1: the apply app's only federated credential is for environment test, so Entra must refuse this token.
+      - name: Sign in as the apply app (must be refused)
+        id: apply_login
+        continue-on-error: true
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.PROBE_APPLY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Check way 1 was refused
+        env:
+          OUTCOME: ${{ steps.apply_login.outcome }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then echo "::error::the apply app signed in from test-plan"; exit 1; fi
+          echo "Way 1 refused: the apply app did not sign in from test-plan."
+
+      # Way 2: the plan app signs in (it must), then tries an import into Test, which must be refused.
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Import into Test as the plan app (must be refused)
+        env:
+          TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          TEST_URL: ${{ secrets.TEST_ENVIRONMENT_URL }}
+        run: |
+          scrub() { sed -E 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/<id>/g'; }
+          url="${TEST_URL%/}"
+          token="$(az account get-access-token --resource "$url" --query accessToken -o tsv)"
+          echo "::add-mask::$token"
+          # Guard: never try the import unless this identity's privileges were read and hold no import privilege.
+          uid="$(curl -s -H "Authorization: Bearer $token" "$url/api/data/v9.2/WhoAmI" | jq -r '.UserId // empty')"
+          if [ -z "$uid" ]; then echo "Way 2 refused: Test answered WhoAmI with no user for the plan app."; exit 0; fi
+          echo "::add-mask::$uid"
+          privs="$(curl -s -H "Authorization: Bearer $token" "$url/api/data/v9.2/systemusers($uid)/Microsoft.Dynamics.CRM.RetrieveUserPrivileges")"
+          if ! jq -e '.RolePrivileges | type == "array"' <<< "$privs" > /dev/null; then echo "::error::the plan app's privileges could not be read; not trying the import"; exit 1; fi
+          if jq -e '.RolePrivileges[] | select(.PrivilegeName == "prvImportCustomization")' <<< "$privs" > /dev/null; then
+            echo "::error::the plan app still holds prvImportCustomization in Test; not trying the import"; exit 1
+          fi
+          echo "The plan app holds no prvImportCustomization in Test; trying the import."
+          if ! pac auth create --githubFederated --tenant "$TENANT_ID" --applicationId "$CLIENT_ID" --environment "$url" > "$RUNNER_TEMP/pac-auth.log" 2>&1; then
+            echo "Way 2 refused at pac's sign-in to Test:"; grep -o -E 'AADSTS[0-9]+|prv[A-Za-z]+|not a member[^.]*' "$RUNNER_TEMP/pac-auth.log" | scrub | sort -u; exit 0
+          fi
+          if pac solution import --path exports/PowerOpsSeed_managed.zip --environment "$url" > "$RUNNER_TEMP/import.log" 2>&1; then
+            echo "::error::the plan app imported into Test"; exit 1
+          fi
+          echo "Way 2 refused: the import into Test failed with:"
+          grep -o -E 'missing prv[A-Za-z]+ privilege|prv[A-Za-z]+|[A-Za-z ]*privilege[^.]*' "$RUNNER_TEMP/import.log" | scrub | sort -u
